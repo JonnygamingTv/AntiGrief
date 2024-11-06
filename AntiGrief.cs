@@ -22,6 +22,11 @@ namespace AntiGrief
     {
         public AntiGrief Instance;
         private DateTime CurTime = DateTime.Now;
+        public HashSet<ushort> _ItemDropDeniedList = new HashSet<ushort>();
+        public HashSet<ushort> _ItemInvRestrictedList = new HashSet<ushort>();
+        public HashSet<ushort> _SkipItemIDs = new HashSet<ushort>();
+        public HashSet<ushort> _SkipElementIDs = new HashSet<ushort>();
+        public HashSet<ushort> _SkipVehicleIDs = new HashSet<ushort>();
 
         protected override void Load()
         {
@@ -32,11 +37,17 @@ namespace AntiGrief
             BarricadeManager.onDamageBarricadeRequested += OnElementDamaged;
             StructureManager.onDamageStructureRequested += OnElementDamaged;
             if (Instance.Configuration.Instance.RestrictHarvesting)
-                BarricadeManager.onHarvestPlantRequested += OnHarvested;
+                InteractableFarm.OnHarvestRequested_Global += OnHarvested;
             if (Configuration.Instance.VehicleCarjackOwnerGroupOnly)
                 VehicleManager.onVehicleCarjacked += OnCarjacked;
             if (Instance.Configuration.Instance.EnableItemDropRestriction)
                 ItemManager.onServerSpawningItemDrop += OnServerSpawningItemDrop;
+
+            _ItemDropDeniedList = new HashSet<ushort>(Configuration.Instance.ItemDropDeniedList);
+            _ItemInvRestrictedList = new HashSet<ushort>(Configuration.Instance.ItemInvRestrictedList);
+            _SkipItemIDs = new HashSet<ushort>(Configuration.Instance.SkipItemIDs);
+            _SkipElementIDs = new HashSet<ushort>(Configuration.Instance.SkipElementIDs);
+            _SkipVehicleIDs = new HashSet<ushort>(Configuration.Instance.SkipVehicleIDs);
         }
 
         protected override void Unload()
@@ -45,7 +56,7 @@ namespace AntiGrief
             BarricadeManager.onDamageBarricadeRequested -= OnElementDamaged;
             StructureManager.onDamageStructureRequested -= OnElementDamaged;
             if (Instance.Configuration.Instance.RestrictHarvesting)
-                BarricadeManager.onHarvestPlantRequested -= OnHarvested;
+                InteractableFarm.OnHarvestRequested_Global -= OnHarvested;
             if (Configuration.Instance.VehicleCarjackOwnerGroupOnly)
                 VehicleManager.onVehicleCarjacked -= OnCarjacked;
             if (Instance.Configuration.Instance.EnableItemDropRestriction)
@@ -54,7 +65,7 @@ namespace AntiGrief
 
         private void OnServerSpawningItemDrop(Item item, ref Vector3 location, ref bool shouldAllow)
         {
-            if (Instance.Configuration.Instance.ItemDropDeniedList.FirstOrDefault(i => i == item.id) != 0)
+            if (_ItemDropDeniedList.Contains(item.id))
                 shouldAllow = false;
         }
 
@@ -80,23 +91,20 @@ namespace AntiGrief
                         UnturnedPlayer player = UnturnedPlayer.FromSteamPlayer(Provider.clients[i]);
                         if (player == null)
                             continue;
-                        if (!R.Permissions.HasPermission(player, "ir.safe"))
+                        if (!player.HasPermission("ir.safe"))
                         {
-                            for (int invi = 0; invi < Instance.Configuration.Instance.ItemInvRestrictedList.Count; invi++)
+                            for (byte page = 0; page < PlayerInventory.PAGES && player.Inventory.items != null && player.Inventory.items[page] != null; page++)
                             {
-                                ushort restrictedItemID = Instance.Configuration.Instance.ItemInvRestrictedList[invi];
-                                for (byte page = 0; page < PlayerInventory.PAGES && player.Inventory.items != null && player.Inventory.items[page] != null; page++)
+                                for (byte itemI = 0; itemI < player.Inventory.getItemCount(page); itemI++)
                                 {
-                                    for (byte itemI = 0; itemI < player.Inventory.getItemCount(page); itemI++)
+                                    ushort ItemID = player.Inventory.getItem(page, itemI).item.id;
+                                    if (_ItemInvRestrictedList.Contains(ItemID))
                                     {
-                                        if (player.Inventory.getItem(page, itemI).item.id == restrictedItemID)
-                                        {
-                                            ItemAsset itemAsset = UnturnedItems.GetItemAssetById(restrictedItemID);
-                                            if (itemAsset == null)
-                                                continue;
-                                            UnturnedChat.Say(player, Translate("antigrief_inv_restricted", itemAsset.itemName, itemAsset.id));
-                                            player.Inventory.removeItem(page, itemI);
-                                        }
+                                        ItemAsset itemAsset = UnturnedItems.GetItemAssetById(ItemID);
+                                        if (itemAsset == null)
+                                            continue;
+                                        UnturnedChat.Say(player, Translate("antigrief_inv_restricted", itemAsset.itemName, itemAsset.id));
+                                        player.Inventory.removeItem(page, itemI);
                                     }
                                 }
                             }
@@ -119,16 +127,19 @@ namespace AntiGrief
             }
         }
 
-        private void OnHarvested(CSteamID steamID, byte x, byte y, ushort plant, ushort index, ref bool shouldAllow)
+        private void OnHarvested(InteractableFarm harvestable, SteamPlayer instigatorPlayer, ref bool shouldAllow)
         {
-            if (BarricadeManager.tryGetRegion(x, y, plant, out BarricadeRegion region) && steamID != (CSteamID)0)
+            BarricadeRegion region = BarricadeManager.regions.Cast<BarricadeRegion>().FirstOrDefault(c => c.drops.Any(d => d != null && d.interactable != null && d.interactable == harvestable));
+            if (region == null) return;
+            BarricadeDrop drop = region.drops.FirstOrDefault(c => c.interactable != null && c.interactable.transform == harvestable.transform);
+            if (drop != null)
             {
-                BarricadeData data = region.barricades[index];
-                UnturnedPlayer instigator = UnturnedPlayer.FromCSteamID(steamID);
-                if ((CSteamID)data.owner != instigator.CSteamID && ((CSteamID)data.group != instigator.Player.quests.groupID || data.group == 0) && !R.Permissions.HasPermission(new RocketPlayer(steamID.ToString()), "antigrief.bypass"))
+                BarricadeData data = drop.GetServersideData();
+                UnturnedPlayer instigatorUser = UnturnedPlayer.FromSteamPlayer(instigatorPlayer);
+                if ((CSteamID)data.owner != instigatorUser.CSteamID && ((CSteamID)data.group != instigatorUser.Player.quests.groupID || data.group == 0) && !R.Permissions.HasPermission(instigatorUser, "antigrief.bypass"))
                 {
                     if (Instance.Configuration.Instance.ShowHarvestBlockMessage)
-                        UnturnedChat.Say(steamID, Instance.Translate("antigrief_harvest_blocked"), Color.red);
+                        UnturnedChat.Say(instigatorUser, Instance.Translate("antigrief_harvest_blocked"), Color.red);
                     shouldAllow = false;
                 }
             }
@@ -171,7 +182,8 @@ namespace AntiGrief
 
         private void OnPrePreLevelLoaded(int level)
         {
-            Asset[] AssetList = Assets.find(EAssetType.ITEM);
+            List<ItemAsset> AssetList = new List<ItemAsset>();
+            Assets.find(AssetList);
 
             ushort gunsModified = 0;
             ushort meleesModified = 0;
@@ -185,30 +197,12 @@ namespace AntiGrief
             Logger.LogWarning("Starting anti grief modification run.");
             BindingFlags bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic;
             bool shouldUpdateCount;
-            for (int i = 0; i < AssetList.Length; i++)
+            for (int i = 0; i < AssetList.Count; i++)
             {
                 shouldUpdateCount = false;
                 Asset asset = AssetList[i];
-                bool shouldSkip = false;
                 // Look for and skip id's in the skil lists.
-                for (int si = 0; si < Configuration.Instance.SkipItemIDs.Count; si++)
-                {
-                    if (asset.id == Configuration.Instance.SkipItemIDs[si])
-                    {
-                        shouldSkip = true;
-                        break;
-                    }
-                }
-                for (int se = 0; se < Configuration.Instance.SkipElementIDs.Count; se++)
-                {
-                    if (asset.id == Configuration.Instance.SkipElementIDs[se])
-                    {
-                        shouldSkip = true;
-                        break;
-                    }
-                }
-                if (shouldSkip)
-                    continue;
+                if (_SkipItemIDs.Contains(asset.id) || _SkipElementIDs.Contains(asset.id)) continue;
 
                 // Run though updating the items/elements/vehicles on the server.
                 if (asset is ItemWeaponAsset)
@@ -420,22 +414,14 @@ namespace AntiGrief
                     elementsModified++;
             }
 
-            Asset[] vehicleList = Assets.find(EAssetType.VEHICLE);
-            for (int v = 0; v < vehicleList.Length; v++)
+            List<VehicleAsset> vehicleList = new List<VehicleAsset>();
+            Assets.find(vehicleList);
+
+            for (int v = 0; v < vehicleList.Count; v++)
             {
                 shouldUpdateCount = false;
                 Asset asset = vehicleList[v];
-                bool shouldSkip = false;
-                for (int i = 0; i < Configuration.Instance.SkipVehicleIDs.Count; i++)
-                {
-                    if (asset.id == Configuration.Instance.SkipVehicleIDs[i])
-                    {
-                        shouldSkip = true;
-                        break;
-                    }
-                }
-                if (shouldSkip == true)
-                    continue;
+                if (_SkipVehicleIDs.Contains(asset.id)) continue;
 
                 VehicleAsset vAsset = asset as VehicleAsset;
                 if ((vAsset.isVulnerable || vAsset.isVulnerableToBumper || vAsset.isVulnerableToEnvironment || vAsset.isVulnerableToExplosions) && Configuration.Instance.MakeVehiclesInvulnerable)
@@ -461,7 +447,7 @@ namespace AntiGrief
                     vAsset.GetType().GetField("_healthMax", bindingFlags).SetValue(vAsset, Configuration.Instance.MinVehicleSpawnHealth);
                     shouldUpdateCount = true;
                 }
-                if (!vAsset.supportsMobileBuildables && Configuration.Instance.VehicleSetMobileBuildables)
+                if (vAsset.BuildablePlacementRule != EVehicleBuildablePlacementRule .AlwaysAllow && Configuration.Instance.VehicleSetMobileBuildables)
                 {
                     vAsset.GetType().GetProperty("supportsMobileBuildables", bindingFlags | BindingFlags.Public).SetValue(vAsset, true, null);
                     // Bundle hash needs to be disabled for these, as this flag for this needs to be set client side as well.
